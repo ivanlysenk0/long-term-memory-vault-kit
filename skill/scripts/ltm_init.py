@@ -495,6 +495,23 @@ python3 scripts/ltm_doctor.py --json    машинний вивід для аг�
 
 
 def install_doctor(vault: Path) -> None:
+    # Планувальник кладемо поруч із лікарем: без нього регулярна перевірка
+    # лишається порадою в тексті, яку ніхто не виконає.
+    sched_src = Path(__file__).resolve().parent / "ltm_schedule.py"
+    if sched_src.is_file():
+        sched_dst = vault / "scripts" / "ltm_schedule.py"
+        sched_dst.parent.mkdir(parents=True, exist_ok=True)
+        if sched_dst.exists():
+            skipped.append(str(sched_dst))
+        else:
+            shutil.copy2(sched_src, sched_dst)
+            created.append(str(sched_dst))
+            if os.name != "nt":
+                try:
+                    sched_dst.chmod(0o755)
+                except OSError:
+                    pass
+
     src = Path(__file__).resolve().parent / "ltm_doctor.py"
     dst = vault / "scripts" / "ltm_doctor.py"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -750,14 +767,43 @@ def print_next_steps(vault: Path, providers: list[str] | None = None) -> None:
                     "gemini": "~/.gemini/GEMINI.md"}.get(prov, "")
         if home_cfg:
             print(f"   {home_cfg}: дописати посилання на {mi}")
-    print("5. Запускати лікаря за розкладом:")
-    if os.name == "nt":
-        print("   Task Scheduler, щодня:")
-        print(f"   python \"{doctor}\" --all --quiet")
+    sched = vault / "scripts" / "ltm_schedule.py"
+    print("5. Регулярна перевірка здоров'я пам'яті:")
+    if sched.is_file():
+        print(f"   python3 \"{sched}\"")
+        print("   Поставить лікаря на розклад: будні, 12:00. Спитає підтвердження.")
     else:
-        print("   crontab -e, рядок:")
-        print(f"   0 20 * * * python3 \"{doctor}\" --all --quiet >> \"{vault / 'scripts' / 'doctor.log'}\" 2>&1")
+        print(f"   python3 \"{doctor}\" --all --quiet")
     print("6. Бекап: пам'ять локальна, копія одна. Тримати копію поза цією машиною.")
+
+
+def offer_schedule(vault: Path, auto_yes: bool = False) -> None:
+    """Запропонувати розклад одразу після встановлення.
+
+    Окремим кроком і тільки за згодою: запис у cron, launchd чи Планувальник
+    Windows це зміна в системі користувача, а не всередині пам'яті.
+    """
+    sched = vault / "scripts" / "ltm_schedule.py"
+    if not sched.is_file():
+        return
+    print("\n=== Регулярна перевірка ===")
+    print("Пам'ять псується тихо: биті посилання й сторінки-сироти не помітні,")
+    print("поки агент не почне відповідати неправильно. Перевірка ловить це заздалегідь.")
+    if not auto_yes:
+        try:
+            a = input("Поставити перевірку на розклад: будні, 12:00? [Т/н]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if a and a not in ("т", "так", "y", "yes"):
+            print("Пропущено. Поставити згодом:")
+            print(f"  python3 \"{sched}\"")
+            return
+    r = subprocess.run([sys.executable or "python3", str(sched),
+                        "--path", str(vault), "--yes"],
+                       capture_output=False)
+    if r.returncode != 0:
+        print("Розклад не поставлено. Спробуй вручну:")
+        print(f"  python3 \"{sched}\"")
 
 
 def main() -> int:
@@ -771,6 +817,10 @@ def main() -> int:
     ap.add_argument("--link", metavar="DIRS",
                     help="підключити пам'ять до робочих проєктів: шляхи через кому")
     ap.add_argument("--no-verify", action="store_true", help="пропустити самоперевірку")
+    ap.add_argument("--schedule", action="store_true",
+                    help="одразу поставити перевірку на розклад: будні, 12:00")
+    ap.add_argument("--no-schedule", action="store_true",
+                    help="не пропонувати розклад")
     ap.add_argument("--providers", metavar="LIST",
                     help="агенти через кому: claude, amp, gemini. За замовчуванням спитає")
     args = ap.parse_args()
@@ -877,6 +927,14 @@ def main() -> int:
     ok = True
     if not args.no_verify:
         ok = verify(vault, linked, providers)
+
+    # Розклад пропонуємо лише коли встановлення справді робоче: ставити
+    # перевірку на зламану пам'ять безглуздо.
+    if ok and not args.check:
+        if args.schedule:
+            offer_schedule(vault, auto_yes=True)
+        elif not args.yes and not args.no_schedule:
+            offer_schedule(vault, auto_yes=False)
 
     print_next_steps(vault, providers)
     return 0 if ok else 1

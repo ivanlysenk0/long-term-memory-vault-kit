@@ -45,7 +45,8 @@ skill/
 └── scripts/
     ├── ltm_detect.py     розвідка машини перед установкою
     ├── ltm_init.py       установка, прийняття наявної пам'яті, підключення
-    └── ltm_doctor.py     перевірка здоров'я сховища
+    ├── ltm_doctor.py     перевірка здоров'я сховища
+    └── ltm_schedule.py   регулярна перевірка за розкладом
 install.sh                установка: macOS, Ubuntu, Debian, Fedora, Arch
 install.ps1               установка: Windows
 ```
@@ -107,10 +108,21 @@ python3 skill/scripts/ltm_doctor.py --vault ~/memory
 - заготовки без змісту
 - сесії, з яких ще не витягнуто знання
 
-Поставте в розклад:
+Поставте в розклад однією командою:
 
+```bash
+python3 skill/scripts/ltm_schedule.py
 ```
-0 20 * * * python3 "<пам'ять>/scripts/ltm_doctor.py" --all --quiet
+
+За замовчуванням: **будні, 12:00**, вихідні пропускаються. Скрипт визначає систему
+сам і питає підтвердження перед записом: Linux `cron`, macOS `launchd`,
+Windows `schtasks`.
+
+```bash
+python3 skill/scripts/ltm_schedule.py --hour 9      # інший час
+python3 skill/scripts/ltm_schedule.py --everyday    # і у вихідні
+python3 skill/scripts/ltm_schedule.py --status      # що стоїть зараз
+python3 skill/scripts/ltm_schedule.py --remove      # прибрати
 ```
 
 ## Куди встановлюється скіл
