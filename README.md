@@ -18,16 +18,16 @@
 ## Швидкий старт
 
 ```bash
-git clone https://github.com/<user>/<repo>.git
-cd <repo>
+git clone https://github.com/ivanlysenk0/long-term-memory-vault-kit.git
+cd long-term-memory-vault-kit
 ./install.sh
 ```
 
 Windows, PowerShell:
 
 ```powershell
-git clone https://github.com/<user>/<repo>.git
-cd <repo>
+git clone https://github.com/ivanlysenk0/long-term-memory-vault-kit.git
+cd long-term-memory-vault-kit
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
