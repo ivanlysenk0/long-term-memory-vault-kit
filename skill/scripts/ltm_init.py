@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,7 +85,10 @@ def ask_yes(prompt: str, default: bool = True) -> bool:
 
 
 def default_vault_path() -> Path:
-    return Path.home() / "memory" / "long-term-memory-vault"
+    # Без проміжної теки: пам'ять кладеться прямо в домашній каталог.
+    # Раніше тут було home/memory/long-term-memory-vault, і на Windows
+    # користувач отримував зайвий рівень вкладеності.
+    return Path.home() / "long-term-memory-vault"
 
 
 # ------------------------------------------------------------- диагностика
@@ -497,18 +501,20 @@ python3 scripts/ltm_doctor.py --json    машинний вивід для аг�
 def install_doctor(vault: Path) -> None:
     # Планувальник кладемо поруч із лікарем: без нього регулярна перевірка
     # лишається порадою в тексті, яку ніхто не виконає.
-    sched_src = Path(__file__).resolve().parent / "ltm_schedule.py"
-    if sched_src.is_file():
-        sched_dst = vault / "scripts" / "ltm_schedule.py"
-        sched_dst.parent.mkdir(parents=True, exist_ok=True)
-        if sched_dst.exists():
-            skipped.append(str(sched_dst))
+    for helper in ("ltm_schedule.py", "ltm_seed.py"):
+        h_src = Path(__file__).resolve().parent / helper
+        if not h_src.is_file():
+            continue
+        h_dst = vault / "scripts" / helper
+        h_dst.parent.mkdir(parents=True, exist_ok=True)
+        if h_dst.exists():
+            skipped.append(str(h_dst))
         else:
-            shutil.copy2(sched_src, sched_dst)
-            created.append(str(sched_dst))
+            shutil.copy2(h_src, h_dst)
+            created.append(str(h_dst))
             if os.name != "nt":
                 try:
-                    sched_dst.chmod(0o755)
+                    h_dst.chmod(0o755)
                 except OSError:
                     pass
 
@@ -667,6 +673,63 @@ def discover_projects(vault: Path, max_depth: int = 3) -> list[dict]:
     return sorted(found, key=lambda x: x["path"])
 
 
+def choose_project_names(vault: Path, auto: bool = False) -> list[str]:
+    """Визначити, які проєкти завести в пам'яті.
+
+    Три гілки, бо ситуації різні:
+      1. на диску знайшлися робочі проєкти -> запропонувати їх переліком
+      2. користувач не хоче жодного зі знайдених -> спитати імена
+      3. проєктів немає взагалі -> спитати імена
+
+    Імен за замовчуванням не вигадуємо: тека, яку людина не просила,
+    в каноні не існує і тільки заважає.
+    """
+    found = discover_projects(vault)
+
+    if auto:
+        # Неінтерактивний режим: беремо імена знайдених проєктів, бо це
+        # єдине, що можна вивести з машини, не питаючи людину.
+        return [Path(p["path"]).name for p in found] if found else []
+
+    if found:
+        print(f"\nНа цій машині знайдено робочих проєктів: {len(found)}")
+        for i, p in enumerate(found, 1):
+            print(f"  {i}. {Path(p['path']).name}")
+            print(f"     {p['path']}  [{', '.join(p['markers'])}]")
+        print("\nДля яких із них завести розділи в пам'яті?")
+        print("  номери через кому, 'всі', або 'жоден' щоб назвати проєкти вручну")
+        raw = ask("Вибір", "всі").strip().lower()
+
+        if raw in ("всі", "все", "all", "*"):
+            return [Path(p["path"]).name for p in found]
+        if raw not in ("жоден", "жодного", "none", "-", "0"):
+            picked = []
+            for tok in raw.split(","):
+                tok = tok.strip()
+                if tok.isdigit() and 1 <= int(tok) <= len(found):
+                    picked.append(Path(found[int(tok) - 1]["path"]).name)
+            if picked:
+                return picked
+        print("\nГаразд, назвемо проєкти вручну.")
+    else:
+        print("\nРобочих проєктів на цій машині не знайдено.")
+        print("Це нормально: розділи пам'яті можна завести під будь-які теми.")
+
+    print("Назви стануть іменами тек у пам'яті, тому краще короткі й латиницею.")
+    print("Приклади: mobile-app, api-testing, research")
+    raw = ask("Назви проєктів через кому", "").strip()
+    names = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        # Ім'я стає шляхом, тому прибираємо все, що ламає файлову систему.
+        safe = re.sub(r'[<>:"/\\|?*]', "-", tok).strip(". ")
+        if safe:
+            names.append(safe)
+    return names
+
+
 def choose_projects(vault: Path) -> list[str]:
     """Показати знайдені проєкти і дати обрати. Без вибору не чіпаємо нічого."""
     print("\nШукаю робочі проєкти...")
@@ -777,6 +840,148 @@ def print_next_steps(vault: Path, providers: list[str] | None = None) -> None:
     print("6. Бекап: пам'ять локальна, копія одна. Тримати копію поза цією машиною.")
 
 
+def obsidian_installed() -> bool:
+    """Чи є Obsidian на машині. Перевіряємо і PATH, і типові шляхи."""
+    if shutil.which("obsidian"):
+        return True
+    candidates = []
+    if sys.platform == "darwin":
+        candidates = [Path("/Applications/Obsidian.app"),
+                      Path.home() / "Applications" / "Obsidian.app"]
+    elif os.name == "nt":
+        la = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("PROGRAMFILES", "")
+        candidates = [Path(la) / "Obsidian" / "Obsidian.exe",
+                      Path(la) / "Programs" / "Obsidian" / "Obsidian.exe",
+                      Path(pf) / "Obsidian" / "Obsidian.exe"]
+    else:
+        candidates = [Path("/var/lib/flatpak/exports/bin/md.obsidian.Obsidian"),
+                      Path("/snap/bin/obsidian")]
+    return any(c.exists() for c in candidates if str(c))
+
+
+def obsidian_install_cmd() -> list[str] | None:
+    """Команда встановлення під поточну систему, або None якщо нема чим."""
+    if os.name == "nt":
+        if shutil.which("winget"):
+            return ["winget", "install", "--id", "Obsidian.Obsidian",
+                    "-e", "--accept-package-agreements", "--accept-source-agreements"]
+        if shutil.which("choco"):
+            return ["choco", "install", "obsidian", "-y"]
+        return None
+    if sys.platform == "darwin":
+        if shutil.which("brew"):
+            return ["brew", "install", "--cask", "obsidian"]
+        return None
+    if shutil.which("flatpak"):
+        return ["flatpak", "install", "-y", "flathub", "md.obsidian.Obsidian"]
+    if shutil.which("snap"):
+        return ["sudo", "snap", "install", "obsidian", "--classic"]
+    return None
+
+
+def offer_obsidian(auto_yes: bool = False) -> None:
+    """Запропонувати встановити Obsidian і справді це зробити.
+
+    Раніше скрипт лише друкував команду встановлення, і людина думала,
+    що програму встановлено. Обіцянка без дії гірша за мовчання.
+    """
+    if obsidian_installed():
+        return
+    cmd = obsidian_install_cmd()
+
+    print("\n=== Obsidian ===")
+    print("Пам'ять це звичайні markdown-файли, вони працюють і без Obsidian.")
+    print("Але саме він показує зв'язки між сторінками графом і робить")
+    print("вікі-посилання клікабельними, тому читати пам'ять зручніше.")
+
+    if not cmd:
+        print("\nАвтоматично встановити не можу: немає пакетного менеджера.")
+        print("Завантаж вручну: https://obsidian.md/download")
+        return
+
+    if not auto_yes:
+        print(f"\nКоманда: {' '.join(cmd)}")
+        try:
+            a = input("Встановити Obsidian зараз? [т/Н]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if a not in ("т", "так", "y", "yes"):
+            print("Пропущено. Встановити пізніше: " + " ".join(cmd))
+            return
+
+    print("Встановлюю, це може зайняти кілька хвилин...")
+    try:
+        r = subprocess.run(cmd, timeout=600)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Не вдалося: {e}")
+        print("Завантаж вручну: https://obsidian.md/download")
+        return
+    if r.returncode == 0 and obsidian_installed():
+        print("Obsidian встановлено.")
+    elif r.returncode == 0:
+        print("Команда завершилась успішно, але програму не видно в системі.")
+        print("Можливо, потрібен перезапуск термінала.")
+    else:
+        print(f"Встановлення не вдалося, код {r.returncode}.")
+        print("Завантаж вручну: https://obsidian.md/download")
+
+
+def offer_seed(vault: Path, seed_file: str | None = None, auto_yes: bool = False) -> None:
+    """Запропонувати наповнити пам'ять готовим вмістом.
+
+    Питання ставимо ЗАВЖДИ, навіть якщо файла seed поруч немає: людина має
+    знати, що така можливість існує, і де взяти файл.
+    """
+    seeder = vault / "scripts" / "ltm_seed.py"
+    if not seeder.is_file():
+        return
+
+    print("\n=== Наповнення пам'яті ===")
+    print("Пам'ять можна почати з чистого аркуша або наповнити готовим вмістом:")
+    print("рішеннями, патернами й розборами, які вже хтось зібрав.")
+    print("Готовий вміст лежить у зашифрованому файлі, пароль дає його власник.")
+    print("\nВаші власні файли при цьому не перезаписуються: якщо сторінка вже є,")
+    print("версія з набору лягає поруч як *.seed.md, а рішення лишається за вами.")
+
+    candidate = seed_file
+    if not candidate and not auto_yes:
+        try:
+            a = input("\nНаповнити пам'ять готовим вмістом? [т/Н]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if a not in ("т", "так", "y", "yes"):
+            print("Гаразд, пам'ять лишається чистою. Наповнити пізніше:")
+            print(f"  python3 \"{seeder}\" --unpack <файл> --vault \"{vault}\"")
+            return
+        try:
+            candidate = input("Шлях до файлу набору: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+    if not candidate:
+        return
+    src = Path(candidate).expanduser()
+    if not src.is_file():
+        print(f"Файл не знайдено: {src}")
+        print(f"Наповнити пізніше: python3 \"{seeder}\" --unpack <файл> --vault \"{vault}\"")
+        return
+
+    # Спершу показуємо, що саме прийде, і лише потім пишемо.
+    subprocess.run([sys.executable or "python3", str(seeder), "--unpack", str(src),
+                    "--vault", str(vault), "--dry-run"])
+    if not auto_yes:
+        try:
+            a = input("\nЗастосувати? [Т/н]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if a and a not in ("т", "так", "y", "yes"):
+            print("Скасовано, нічого не записано.")
+            return
+    subprocess.run([sys.executable or "python3", str(seeder), "--unpack", str(src),
+                    "--vault", str(vault)])
+
+
 def offer_schedule(vault: Path, auto_yes: bool = False) -> None:
     """Запропонувати розклад одразу після встановлення.
 
@@ -817,6 +1022,12 @@ def main() -> int:
     ap.add_argument("--link", metavar="DIRS",
                     help="підключити пам'ять до робочих проєктів: шляхи через кому")
     ap.add_argument("--no-verify", action="store_true", help="пропустити самоперевірку")
+    ap.add_argument("--no-obsidian", action="store_true",
+                    help="не пропонувати встановлення Obsidian")
+    ap.add_argument("--seed", metavar="FILE",
+                    help="наповнити пам'ять готовим вмістом із зашифрованого файлу")
+    ap.add_argument("--no-seed", action="store_true",
+                    help="не питати про наповнення готовим вмістом")
     ap.add_argument("--schedule", action="store_true",
                     help="одразу поставити перевірку на розклад: будні, 12:00")
     ap.add_argument("--no-schedule", action="store_true",
@@ -841,7 +1052,8 @@ def main() -> int:
         providers = [p.strip().lower() for p in args.providers.split(",")
                      if p.strip().lower() in PROVIDERS]
     elif args.yes:
-        providers = ["claude", "amp"]
+        # Раніше тут було ["claude", "amp"], і GEMINI.md мовчки не створювався.
+        providers = list(PROVIDERS)
     else:
         print("Яким агентом ти користуєшся? Можна кілька.")
         for i, (k, v) in enumerate(PROVIDERS.items(), 1):
@@ -864,11 +1076,13 @@ def main() -> int:
 
     if args.projects:
         projects = [p.strip() for p in args.projects.split(",") if p.strip()]
-    elif args.yes:
-        projects = ["work"]
     else:
-        raw = ask("Проєкти через кому (це просто теки, потім додаси ще)", "work")
-        projects = [p.strip() for p in raw.split(",") if p.strip()]
+        # Ніяких імен за замовчуванням: раніше тут з'являлася тека "work",
+        # якої немає в каноні і яку користувач не просив.
+        projects = choose_project_names(vault, auto=args.yes)
+    if not projects:
+        print("Без жодного проєкту пам'ять не має сенсу. Скасовано.")
+        return 1
 
     if not args.yes:
         print(f"\nСтворю пам'ять у {vault}")
@@ -910,7 +1124,14 @@ def main() -> int:
     link_targets: list[str] = []
     if args.link:
         link_targets = [t.strip() for t in args.link.split(",") if t.strip()]
-    elif not args.yes:
+    elif args.yes:
+        # Раніше в цій гілці підключення пропускалося зовсім, і в робочих
+        # проєктах не з'являлося правил: агент відкривав проєкт і не знав,
+        # що пам'ять узагалі існує. Тепер підключаємо знайдені проєкти.
+        link_targets = [p["path"] for p in discover_projects(vault)]
+        if link_targets:
+            print(f"\nПідключаю пам'ять до знайдених проєктів: {len(link_targets)}")
+    else:
         link_targets = choose_projects(vault)
 
     for t in link_targets:
@@ -919,6 +1140,12 @@ def main() -> int:
             print(f"  пропущено, каталогу немає: {pdir}")
             continue
         linked += link_project(pdir, vault, providers)
+
+    # Підключення це половина справи: якщо файл правил не з'явився,
+    # агент у проєкті пам'ять не побачить. Перевіряємо явно.
+    if link_targets and not linked:
+        print("  УВАГА: жодного файлу правил не створено в проєктах.")
+        print("  Підключи вручну: ltm_init.py --link <шлях> --providers claude")
 
     print(f"\nСтворено файлів і тек: {len(created)}")
     if skipped:
@@ -930,6 +1157,13 @@ def main() -> int:
 
     # Розклад пропонуємо лише коли встановлення справді робоче: ставити
     # перевірку на зламану пам'ять безглуздо.
+    if ok and not args.check and not args.no_obsidian and not args.yes:
+        offer_obsidian()
+
+    # Наповнення пропонуємо ДО розкладу: спершу вміст, потім догляд за ним.
+    if ok and not args.check and not args.no_seed:
+        offer_seed(vault, seed_file=args.seed, auto_yes=bool(args.seed) and args.yes)
+
     if ok and not args.check:
         if args.schedule:
             offer_schedule(vault, auto_yes=True)
