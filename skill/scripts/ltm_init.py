@@ -20,6 +20,7 @@ ltm_init.py - інтерактивне розгортання довготрив
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -43,6 +44,9 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 
 created: list[str] = []
 skipped: list[str] = []
+# Що саме ми зробили в чужих проєктах. Потрібно для чесного видалення:
+# створений нами файл прибирається цілком, чужий лише звільняється від блока.
+link_records: list[dict] = []
 
 
 def fm(title: str, project: str, ftype: str, tags: list[str]) -> str:
@@ -498,10 +502,51 @@ python3 scripts/ltm_doctor.py --json    машинний вивід для аг�
 """
 
 
+MANIFEST = ".ltm-install-manifest.json"
+
+
+def write_manifest(vault: Path, projects: list[str], providers: list[str]) -> None:
+    """Записати, що саме створила установка.
+
+    Без цього видалення діє за здогадом: воно не може відрізнити `CLAUDE.md`,
+    який ми створили, від того, що людина писала сама півроку тому.
+    Манифест доповнюється, а не переписується: друга установка в ті самі
+    проєкти не повинна стирати пам'ять про першу.
+    """
+    p = vault / MANIFEST
+    data = {"version": 1, "installs": []}
+    if p.is_file():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(old, dict) and isinstance(old.get("installs"), list):
+                data = old
+        except (ValueError, OSError):
+            pass
+
+    known = {(r["path"], r["action"]) for r in data.get("project_links", [])}
+    merged = list(data.get("project_links", []))
+    for rec in link_records:
+        if (rec["path"], rec["action"]) not in known:
+            merged.append(rec)
+
+    data["vault"] = str(vault)
+    data["project_links"] = merged
+    data["installs"].append({
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "projects": projects,
+        "providers": providers,
+        "created": len(created),
+    })
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        print(f"  УВАГА: манифест не записано ({e}). Видалення діятиме за ознаками.")
+
+
 def install_doctor(vault: Path) -> None:
     # Планувальник кладемо поруч із лікарем: без нього регулярна перевірка
     # лишається порадою в тексті, яку ніхто не виконає.
-    for helper in ("ltm_schedule.py", "ltm_seed.py"):
+    for helper in ("ltm_schedule.py", "ltm_seed.py", "ltm_uninstall.py"):
         h_src = Path(__file__).resolve().parent / helper
         if not h_src.is_file():
             continue
@@ -594,13 +639,16 @@ def link_project(project_dir: Path, vault: Path, providers: list[str]) -> list[s
                 if new != text:
                     target.write_text(new, encoding="utf-8")
                     done.append(f"{target} (оновлено блок)")
+                link_records.append({"path": str(target), "action": "block_updated"})
             else:
                 with target.open("a", encoding="utf-8") as fh:
                     fh.write("\n\n" + block)
                 done.append(f"{target} (дописано блок)")
+                link_records.append({"path": str(target), "action": "block_appended"})
         else:
             target.write_text(f"# {project_dir.name}\n\n" + block, encoding="utf-8")
             done.append(f"{target} (створено)")
+            link_records.append({"path": str(target), "action": "created"})
     return done
 
 
@@ -1011,6 +1059,27 @@ def offer_schedule(vault: Path, auto_yes: bool = False) -> None:
         print(f"  python3 \"{sched}\"")
 
 
+def run_uninstall(extra: list[str]) -> int:
+    """Передати роботу ltm_uninstall.py.
+
+    Логіку видалення тримаємо в одному місці: копія тут швидко розійдеться
+    з оригіналом, і відкат почне лишати сліди саме тоді, коли на нього
+    покладаються найбільше.
+    """
+    here = Path(__file__).resolve().parent
+    script = here / "ltm_uninstall.py"
+    if not script.is_file():
+        # Скрипт міг лишитися лише всередині вже встановленої пам'яті.
+        for base in (Path.home(), Path.home() / "Documents"):
+            for cand in base.glob("*/scripts/ltm_uninstall.py"):
+                script = cand
+                break
+    if not script.is_file():
+        print("Поруч немає ltm_uninstall.py. Візьми його з репозиторію скіла.")
+        return 1
+    return subprocess.call([sys.executable, str(script)] + extra)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Розгорнути довготривалу пам'ять агентів")
     ap.add_argument("--path", help="шлях до vault")
@@ -1034,9 +1103,25 @@ def main() -> int:
                     help="не пропонувати розклад")
     ap.add_argument("--providers", metavar="LIST",
                     help="агенти через кому: claude, amp, gemini. За замовчуванням спитає")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="прибрати пам'ять і всі сліди установки")
     args = ap.parse_args()
 
-    print("Розгортання довготривалої пам'яті агентів\n")
+    print("Довготривала пам'ять агентів\n")
+
+    # Розвилка на старті. Друга гілка потрібна насамперед для тестування:
+    # без відкату скіл перевіряється на машині рівно один раз, і друга спроба
+    # вже йде поверх залишків першої.
+    if args.uninstall:
+        return run_uninstall([])
+    if not args.yes and not args.check and not args.path and not args.adopt:
+        print("Що робимо?")
+        print("  1. Встановити або оновити пам'ять")
+        print("  2. Видалити все, що поставив цей скіл")
+        choice = ask("Номер", "1").strip()
+        if choice == "2":
+            return run_uninstall([])
+        print()
 
     vault = Path(args.path).expanduser() if args.path else default_vault_path()
     if not args.path and not args.yes and not args.check:
@@ -1146,6 +1231,8 @@ def main() -> int:
     if link_targets and not linked:
         print("  УВАГА: жодного файлу правил не створено в проєктах.")
         print("  Підключи вручну: ltm_init.py --link <шлях> --providers claude")
+
+    write_manifest(vault, projects, providers)
 
     print(f"\nСтворено файлів і тек: {len(created)}")
     if skipped:

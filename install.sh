@@ -89,7 +89,8 @@ first="${TARGETS[0]##*|}/$NAME"
 import sys, pathlib
 d = pathlib.Path(sys.argv[1])
 need = ["SKILL.md", "scripts/ltm_detect.py", "scripts/ltm_init.py",
-        "scripts/ltm_doctor.py", "scripts/ltm_schedule.py", "scripts/ltm_seed.py"]
+        "scripts/ltm_doctor.py", "scripts/ltm_schedule.py", "scripts/ltm_seed.py",
+        "scripts/ltm_uninstall.py"]
 missing = [n for n in need if not (d / n).is_file()]
 if missing:
     print("ПОМИЛКА: не вистачає файлів: " + ", ".join(missing)); sys.exit(1)
