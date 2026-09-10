@@ -77,6 +77,8 @@ for t in "${TARGETS[@]}"; do
   dir="${t##*|}/$NAME"
   mkdir -p "$dir"
   cp -R "$SRC/." "$dir/"
+  # __pycache__ лишається від запусків у репозиторії і їде до користувача.
+  find "$dir" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   chmod +x "$dir"/scripts/*.py 2>/dev/null || true
   say "встановлено: $label -> $dir"
 done
@@ -86,7 +88,8 @@ first="${TARGETS[0]##*|}/$NAME"
 "$PY" - "$first" <<'PY'
 import sys, pathlib
 d = pathlib.Path(sys.argv[1])
-need = ["SKILL.md", "scripts/ltm_detect.py", "scripts/ltm_init.py", "scripts/ltm_doctor.py"]
+need = ["SKILL.md", "scripts/ltm_detect.py", "scripts/ltm_init.py",
+        "scripts/ltm_doctor.py", "scripts/ltm_schedule.py", "scripts/ltm_seed.py"]
 missing = [n for n in need if not (d / n).is_file()]
 if missing:
     print("ПОМИЛКА: не вистачає файлів: " + ", ".join(missing)); sys.exit(1)
