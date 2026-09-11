@@ -143,7 +143,15 @@ def install(dry):
     hooks = data.setdefault("hooks", {})
     changes = []
 
-    for event, (script, timeout, msg) in OURS.items():
+    # Stop ставим только для сховища под git: он коммитит и пушит, а без
+    # удалённого репозитория такому хуку нечего делать. Отсюда же и порядок:
+    # сначала он помечает кандидатов в knowledge, потом отправляет изменения,
+    # чтобы очередь уехала тем же коммитом.
+    planned = dict(OURS)
+    if (vault / ".git").is_dir() and (scripts_dir() / SYNC_HOOK[1]).is_file():
+        planned[SYNC_HOOK[0]] = SYNC_HOOK[1:]
+
+    for event, (script, timeout, msg) in planned.items():
         spec = {"type": "command", "command": cmd_for(script),
                 "timeout": timeout, "statusMessage": msg}
         groups = hooks.setdefault(event, [])
