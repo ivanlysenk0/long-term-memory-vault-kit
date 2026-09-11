@@ -60,6 +60,10 @@ planned: list[str] = []
 # створений нами файл прибирається цілком, чужий лише звільняється від блока.
 link_records: list[dict] = []
 
+# Службові каталоги сховища: вони не є проєктами і не повинні пропонуватися
+# як відповідник робочому проєкту.
+SERVICE_DIRS = {"00-global-home", "scripts", "Clippings", ".git", ".obsidian"}
+
 
 def fm(title: str, project: str, ftype: str, tags: list[str]) -> str:
     tag_lines = "\n".join(f"  - {t}" for t in tags)
@@ -223,6 +227,68 @@ def make_project(vault: Path, project: str) -> None:
         fm(f"{project}: черга на збирання", project, "index", ["pending"]) +
         "# Черга на збирання\n\nSession-логи, з яких ще не вийняті концепти в `knowledge/`.\n"
         "Заповнює команда `ltm_doctor.py --scout`.\n")
+
+
+def entry_rel(vault: Path, projects: list[str] | None = None) -> str:
+    """Відносний шлях точки входу в пам'ять.
+
+    Канон Карпати знає один `index.md` на сховище. Мастер-індекс над індексами
+    це вимушене розширення для мультипроєктності, і називати його `index.md`
+    не можна: у проєктів теж є свої `index.md`, і два різні файли з однією
+    назвою в одному сховищі плутають і агента, і людину.
+
+    Тому: один проєкт це канонічний `index.md` у корені, кілька проєктів це
+    `00-global-home/master-index.md`.
+
+    Наявний файл завжди сильніший за розрахунок: якщо сховище вже розгорнуте,
+    точку входу не перейменовуємо, інакше поламаються всі посилання на неї.
+    """
+    if (vault / "00-global-home" / "master-index.md").is_file():
+        return "00-global-home/master-index.md"
+    if (vault / "index.md").is_file():
+        return "index.md"
+    return "index.md" if len(projects or []) <= 1 else "00-global-home/master-index.md"
+
+
+def make_single_index(vault: Path, project: str, providers: list[str] | None = None) -> None:
+    """Точка входу для сховища з одним проєктом: `index.md` у корені.
+
+    Каталог `00-global-home` тут не створюється навмисно: рівень «спільні знання
+    кількох проєктів» при одному проєкті порожній, а порожній каталог у пам'яті
+    це шум, який агент щоразу перечитує.
+    """
+    idx = vault / "index.md"
+    if idx.is_file():
+        return
+    write_once(idx,
+        fm("Index", project, "index", ["navigation", "index"]) +
+        "# Index\n\nТочка входу в довготривалу пам'ять. Будь-який запит починається звідси.\n\n"
+        "## Перш ніж працювати з пам'яттю\n\n"
+        f"Правила роботи: [[{project}/00-home/operations|{project}/00-home/operations.md]]\n\n"
+        "## Проєкт\n\n| Проєкт | Статус | Вхідна точка |\n|--------|--------|---------------|\n"
+        f"| [[{project}/00-home/index\\|{project}]] | Active | [[{project}/00-home/index]] |\n\n"
+        "## Сторінки знань\n\n"
+        "Рядок на сторінку: посилання і один рядок опису. Оновлюється в момент\n"
+        "створення сторінки, а не наприкінці сесії: сторінка без рядка тут\n"
+        "не знаходиться пошуком і фактично втрачена.\n\n"
+        "## Авторство записів\n\n"
+        "Поле `agent` у шапці файла відповідає на питання «хто записав», `date` на питання «коли».\n")
+
+    write_once(vault / "log.md",
+        fm("Журнал", project, "index", ["log"]) +
+        f"# Журнал\n\n## {TODAY} init | пам'ять розгорнуто локально\n")
+
+
+def make_entry(vault: Path, projects: list[str], providers: list[str] | None = None) -> None:
+    """Створити точку входу відповідно до кількості проєктів.
+
+    Один проєкт це канон Карпати: `index.md` у корені сховища. Кілька проєктів
+    вимагають рівня над індексами, і тоді з'являється `00-global-home/`.
+    """
+    if entry_rel(vault, projects) == "index.md":
+        make_single_index(vault, projects[0] if projects else "project", providers)
+    else:
+        make_global_home(vault, projects, providers)
 
 
 def make_global_home(vault: Path, projects: list[str], providers: list[str] | None = None) -> None:
@@ -809,7 +875,7 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
     skipped.clear()
     DRY_RUN = True
     try:
-        make_global_home(vault, projects, providers)
+        make_entry(vault, projects, providers)
         for p in projects:
             make_project(vault, p)
     finally:
@@ -903,7 +969,7 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
         return 0
 
     created.clear()
-    make_global_home(vault, projects, providers)
+    make_entry(vault, projects, providers)
     for p in projects:
         make_project(vault, p)
 
@@ -932,46 +998,149 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
     return 0
 
 
-MEMORY_BLOCK_START = "<!-- ltm:start -->"
-MEMORY_BLOCK_END = "<!-- ltm:end -->"
+# Тексти блоку живуть в окремому модулі: він великий, і тримати три мовні
+# версії всередині установника означає щоразу гортати їх, шукаючи логіку.
+try:
+    from ltm_blocks import (MEMORY_BLOCK_START, MEMORY_BLOCK_END,
+                            BLOCK_TEXT, DEFAULT_BLOCK_LANG)
+except ImportError:  # запуск не з каталогу скрипта
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ltm_blocks import (MEMORY_BLOCK_START, MEMORY_BLOCK_END,
+                            BLOCK_TEXT, DEFAULT_BLOCK_LANG)
 
 
-def memory_block(vault: Path, provider: str = "claude") -> str:
-    """Блок, який вставляється в правила робочого проєкту.
+def detect_lang(project_dir: Path) -> str:
+    """Мова, якою написані правила проєкту: 'uk', 'ru' або 'en'.
 
-    Обгорнутий маркерами, щоб повторний запуск оновлював його, а не плодив копії."""
-    rules_file = PROVIDERS.get(provider, PROVIDERS["claude"])["file"]
-    return (
-        f"{MEMORY_BLOCK_START}\n"
-        "## Довготривала пам'ять\n\n"
-        "Це НЕ пам'ять цього проєкту і не файл MEMORY.md агента. Це окреме файлове\n"
-        "сховище знань, спільне для всіх проєктів на цій машині.\n\n"
-        f"Каталог пам'яті: `{vault}`\n\n"
-        "Порядок звернення до неї:\n"
-        f"1. правила роботи з пам'яттю: `{vault / rules_file}`\n"
-        f"2. точка входу в саму пам'ять: `{vault / '00-global-home' / 'master-index.md'}`\n"
-        "3. далі за посиланнями з master-index: `<проєкт>/00-home/index.md`,\n"
-        "   `knowledge/decisions/`, `knowledge/patterns/`, `current-priorities.md`, `hot.md`,\n"
-        "   свіжі файли в `<проєкт>/sessions/`\n\n"
-        "Коли звертатися: питання про раніше ухвалені рішення, архітектуру, причини бага,\n"
-        "про те, що вже обговорювалося. Не відповідати «не знаю», не пройшовши цей шлях.\n\n"
-        "Що записувати: нові зв'язки, синтез із різних джерел, порівняння підходів,\n"
-        "root cause бага, архітектурний висновок. Не записувати просту видачу факту.\n\n"
-        "Наприкінці сесії: лог у `<проєкт>/sessions/`, оновити `log.md`.\n"
-        "Перевірка здоров'я: `python3 " + str(vault / "scripts" / "ltm_doctor.py") + "`\n"
-        f"{MEMORY_BLOCK_END}\n"
-    )
+    Блок пам'яті має говорити тією ж мовою, що й решта файлу правил. Інакше
+    в проєкті виходить суміш, яку незручно читати людині й легко зіпсувати
+    агенту при редагуванні.
+
+    Визначаємо по наявному файлу правил, а не питаємо: людина вже один раз
+    відповіла на це питання, коли писала свій CLAUDE.md.
+    """
+    for fname in ALL_RULE_FILES:
+        f = project_dir / fname
+        if not f.is_file():
+            continue
+        try:
+            t = f.read_text(encoding="utf-8", errors="replace")[:20000]
+        except OSError:
+            continue
+        # Блок, який ми самі колись вставили, до уваги не беремо: інакше мова
+        # визначиться по нашому ж тексту, а не по тексту людини.
+        if MEMORY_BLOCK_START in t and MEMORY_BLOCK_END in t:
+            t = t[:t.index(MEMORY_BLOCK_START)] + t[t.index(MEMORY_BLOCK_END):]
+        cyr = sum(1 for ch in t if "\u0400" <= ch <= "\u04ff")
+        lat = sum(1 for ch in t if ch.isascii() and ch.isalpha())
+        # Поріг відносний, а не абсолютний. Раніше стояло `cyr < 40`, і короткий
+        # російський файл на 3 рядки визначався як англійський: кирилиці в ньому
+        # менше сорока символів, хоча англійських слів немає взагалі.
+        if cyr == 0 or cyr * 4 < lat:
+            return "en"
+        # Українську від російської відрізняють насамперед власні літери.
+        uk_only = sum(t.count(ch) for ch in "їєґІЇЄҐ")
+        ru_only = sum(t.count(ch) for ch in "ыэъЫЭЪ")
+        if uk_only and not ru_only:
+            return "uk"
+        if ru_only and not uk_only:
+            return "ru"
+        # Літер-маркерів немає або є обидві: вирішуємо за словами. Короткі
+        # тексти на 3 рядки трапляються часто, тому список слів широкий.
+        low = " " + t.lower().replace("\n", " ") + " "
+        uk_words = sum(low.count(w) for w in (
+            " що ", " або ", " які ", " цей ", " лише ", " перед ", " треба ",
+            " робить ", " сервіс ", " бот ", " для ", " після ", " через "))
+        ru_words = sum(low.count(w) for w in (
+            " что ", " или ", " которые ", " этот ", " только ", " перед ",
+            " нужно ", " делает ", " сервис ", " бот ", " для ", " после ", " через "))
+        if uk_only > ru_only:
+            return "uk"
+        if ru_only > uk_only:
+            return "ru"
+        return "uk" if uk_words > ru_words else "ru"
+    return DEFAULT_BLOCK_LANG
 
 
-def link_project(project_dir: Path, vault: Path, providers: list[str]) -> list[str]:
+def memory_block(vault: Path, provider: str = "claude", project: str = "",
+                 lang: str = "uk", entry: str = "") -> str:
+    """Блок правил роботи з пам'яттю для файлу інструкцій робочого проєкту.
+
+    Це головний текст усього скіла: саме його читає агент, відкритий у робочому
+    проєкті. Агент НЕ відкривається всередині пам'яті, тому файл правил у корені
+    сховища він не побачить ніколи. Усе потрібне має бути тут.
+
+    Склад блоку відповідає канону Карпати: три шари (Raw, Wiki, Schema) і три
+    операції (Ingest, Query, Lint). Без операції Ingest сировина з `Raw/` ніколи
+    не перетворюється на знання, а без Lint база тихо заростає сиротами
+    й битими посиланнями.
+    """
+    entry = entry or entry_rel(vault)
+    p = project or "<проєкт>"
+    T = BLOCK_TEXT[lang if lang in BLOCK_TEXT else "uk"]
+    return T(vault, p, entry) 
+
+
+def match_vault_project(project_dir: Path, vault: Path) -> str | None:
+    """Знайти каталог у сховищі, який відповідає цьому робочому проєкту.
+
+    Імена збігаються не завжди: на диску `Sky-Kids-SMM-bot`, у сховищі
+    `sky-kids-smm-bot`. Канон не вимагає однакових імен, тому здогадуватися
+    не можна: підставиш у блок неіснуючий каталог, і агент піде в нікуди.
+
+    Порядок: точний збіг, потім збіг без урахування регістру й роздільників.
+    Нічого не знайшли означає None, і викликач запитає людину.
+    """
+    name = project_dir.name
+
+    def norm(s: str) -> str:
+        return re.sub(r"[-_\s.]+", "", s).lower()
+
+    candidates = []
+    for d in sorted(vault.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name in SERVICE_DIRS:
+            continue
+        candidates.append(d.name)
+    if name in candidates:
+        return name
+    target = norm(name)
+    hits = [c for c in candidates if norm(c) == target]
+    return hits[0] if len(hits) == 1 else None
+
+
+def link_project(project_dir: Path, vault: Path, providers: list[str],
+                 project: str = "", lang: str = "") -> list[str]:
     """Прописати посилання на пам'ять у файлах правил робочого проєкту.
 
     Файл створюється, лише якщо провайдера обрав користувач: зайвий GEMINI.md
     у проєкті людини, яка Gemini не користується, це сміття."""
+    # Запобіжник проти тестових прогонів. Якщо пам'ять лежить у тимчасовій
+    # теці, значить це тест, і дописувати такий шлях у робочі файли правил
+    # не можна: після перезавантаження машини тека зникне, а інструкція
+    # «пам'ять лежить тут» залишиться назавжди і поведе агента в нікуди.
+    vs = str(vault.resolve())
+    if vs.startswith(("/tmp/", "/var/tmp/", "/private/tmp/")) or "\\Temp\\" in vs:
+        print(f"  ПРОПУЩЕНО {project_dir}: пам'ять у тимчасовій теці ({vault}).")
+        print("  Це схоже на тестовий прогін. Робочі файли правил не чіпаю.")
+        return []
+
     done = []
+    # Мова блоку береться з наявних правил проєкту: людина вже відповіла на це
+    # питання, коли писала свій файл. Питати вдруге зайве.
+    lang = lang or detect_lang(project_dir)
+    # Ім'я каталогу в сховищі, а не ім'я теки проєкту на диску: вони
+    # збігаються не завжди, і помилка тут веде агента в неіснуючий каталог.
+    if not project:
+        project = match_vault_project(project_dir, vault)
+        if not project:
+            print(f"  УВАГА {project_dir.name}: у сховищі немає каталогу з такою назвою.")
+            print(f"    Каталоги сховища: {', '.join(sorted(d.name for d in vault.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name not in SERVICE_DIRS)) or 'жодного'}")
+            project = ask(f"    Який каталог сховища відповідає проєкту {project_dir.name}?",
+                          project_dir.name)
+    entry = entry_rel(vault)
     for prov in providers:
         fname = PROVIDERS[prov]["file"]
-        block = memory_block(vault, prov)
+        block = memory_block(vault, prov, project=project, lang=lang, entry=entry)
         target = project_dir / fname
         if target.is_file():
             text = target.read_text(encoding="utf-8", errors="replace")
@@ -1003,7 +1172,7 @@ def adopt_existing(vault: Path, providers: list[str]) -> list[str]:
                       if d.is_dir() and not d.name.startswith(".")
                       and d.name not in ("scripts", "Clippings"))
     if not (vault / "00-global-home" / "master-index.md").is_file():
-        make_global_home(vault, projects, providers)
+        make_entry(vault, projects, providers)
         notes.append("створено 00-global-home/master-index.md, точки входу не було")
     else:
         # Точка входа есть, но может не вести к правилам. Дописываем ссылку, текст не трогаем.
@@ -1033,7 +1202,8 @@ def discover_projects(vault: Path, max_depth: int = 3) -> list[dict]:
                "Cargo.toml", "pom.xml", "build.gradle", "composer.json", "Gemfile",
                "CMakeLists.txt", "Makefile", "docker-compose.yml"]
     skip = {".cache", ".local", "Library", "AppData", "node_modules", ".npm", ".nvm",
-            "snap", "Applications", ".Trash", ".git", "venv", ".venv", "OrbStack"}
+            "snap", "Applications", ".Trash", ".git", "venv", ".venv", "OrbStack",
+            "Photos Library.photoslibrary", "Music", "Movies", "Pictures"}
     found, seen = [], set()
 
     def walk(d: Path, depth: int):
@@ -1058,10 +1228,29 @@ def discover_projects(vault: Path, max_depth: int = 3) -> list[dict]:
             if e.is_dir() and not e.is_symlink():
                 walk(e, depth + 1)
 
-    for root in [Path.home(), Path.home() / "projects", Path.home() / "dev",
-                 Path.home() / "work", Path.home() / "src", Path.home() / "Documents"]:
+    roots = [Path.home(), Path.home() / "projects", Path.home() / "dev",
+             Path.home() / "work", Path.home() / "src", Path.home() / "Documents",
+             Path.home() / "Developer", Path.home() / "repos", Path.home() / "code"]
+    # Хмарні каталоги. Фізично вони лежать на диску, тому проєкт у них нічим
+    # не відрізняється від локального, але типовий обхід домашньої теки їх
+    # пропускає: на macOS вони сховані всередині `Library`, яку ми свідомо
+    # обходимо стороною через тисячі службових файлів.
+    cloud = [
+        Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs",  # iCloud Drive
+        Path.home() / "iCloud Drive",
+        Path.home() / "OneDrive",
+        Path.home() / "Dropbox",
+        Path.home() / "Google Drive",
+        Path.home() / "Yandex.Disk",
+    ]
+    for root in roots:
         if root.is_dir():
             walk(root, 1)
+    for root in cloud:
+        if root.is_dir():
+            # Усередині хмари дозволяємо на рівень глибше: там типова вкладеність
+            # виду `Personal/AI/Automations/<проєкт>`.
+            walk(root, 0)
     return sorted(found, key=lambda x: x["path"])
 
 
@@ -1159,18 +1348,22 @@ def verify(vault: Path, linked: list[str], providers: list[str]) -> bool:
     print("\n=== Самоперевірка ===")
     ok = True
 
-    mi = vault / "00-global-home" / "master-index.md"
+    ent = entry_rel(vault)
+    mi = vault / ent
     checks = [
         ("каталог пам'яті", vault.is_dir()),
-        ("точка входу master-index.md", mi.is_file()),
+        (f"точка входу {ent}", mi.is_file()),
     ]
     for prov in providers:
         f = PROVIDERS[prov]["file"]
         checks.append((f"правила {f} ({PROVIDERS[prov]['label']})", (vault / f).is_file()))
-    # Точка входа обязана вести к правилам, иначе агент их не найдёт.
-    if mi.is_file():
+    # Точка входу має вести до правил лише в мультипроєктному сховищі:
+    # там у корені лежать файли-вказівники. У канонічному сховищі з одним
+    # проєктом їх немає навмисно, і вимагати посилання на них означало б
+    # завалювати самоперевірку на штатній конфігурації.
+    if mi.is_file() and ent != "index.md":
         txt = mi.read_text(encoding="utf-8", errors="replace")
-        checks.append(("master-index посилається на файли правил",
+        checks.append(("точка входу посилається на файли правил",
                        all(PROVIDERS[p]["file"] in txt for p in providers)))
     checks += [
         ("лікар ltm_doctor.py", (vault / "scripts" / "ltm_doctor.py").is_file()),
@@ -1179,6 +1372,37 @@ def verify(vault: Path, linked: list[str], providers: list[str]) -> bool:
     for label, res in checks:
         print(f"  {'ok  ' if res else 'ЗБІЙ'} {label}")
         ok = ok and res
+
+    # Перевірка того, що скіл записав у чужі файли. Блок може лягти успішно,
+    # але вказувати на неіснуючий каталог: тоді агент у проєкті мовчки
+    # не знайде пам'ять, і людина дізнається про це через тиждень.
+    if link_records:
+        print("\n  Перевіряю шляхи, записані в проєкти:")
+        for rec in link_records:
+            pth = Path(rec["path"])
+            if not pth.is_file():
+                print(f"    ЗБІЙ файл правил зник: {pth}")
+                ok = False
+                continue
+            txt = pth.read_text(encoding="utf-8", errors="replace")
+            if MEMORY_BLOCK_START not in txt or MEMORY_BLOCK_END not in txt:
+                print(f"    ЗБІЙ блока немає у файлі: {pth}")
+                ok = False
+                continue
+            block = txt[txt.index(MEMORY_BLOCK_START):txt.index(MEMORY_BLOCK_END)]
+            bad = []
+            for chunk in re.findall(r"`([^`]+)`", block):
+                c = chunk.strip()
+                # Перевіряємо лише абсолютні шляхи: відносні розв'язуються
+                # всередині сховища, їх перевіряє лікар.
+                if c.startswith("/") or (len(c) > 2 and c[1] == ":" and c[2] in "\\/"):
+                    if not Path(c).exists():
+                        bad.append(c)
+            if bad:
+                print(f"    ЗБІЙ {pth}: шлях не існує: {bad[0]}")
+                ok = False
+            else:
+                print(f"    ok   {pth}")
 
     doctor = vault / "scripts" / "ltm_doctor.py"
     if doctor.is_file():
@@ -1207,15 +1431,20 @@ def verify(vault: Path, linked: list[str], providers: list[str]) -> bool:
 def print_next_steps(vault: Path, providers: list[str] | None = None) -> None:
     providers = providers or ["claude"]
     doctor = vault / "scripts" / "ltm_doctor.py"
-    mi = vault / "00-global-home" / "master-index.md"
+    mi = vault / entry_rel(vault)
     print("\n=== Що далі ===")
     print("1. Перевірити пам'ять просто зараз:")
     print(f"   python3 \"{doctor}\"")
     print("2. Точка входу в пам'ять (її агент відкриває першою):")
     print(f"   {mi}")
-    print("3. Файли правил у корені пам'яті:")
-    for prov in providers:
-        print(f"   {vault / PROVIDERS[prov]['file']}  ->  {PROVIDERS[prov]['label']}")
+    if any((vault / PROVIDERS[p]["file"]).is_file() for p in providers):
+        print("3. Файли-вказівники в корені пам'яті (на випадок сесії прямо в ній):")
+        for prov in providers:
+            if (vault / PROVIDERS[prov]["file"]).is_file():
+                print(f"   {vault / PROVIDERS[prov]['file']}  ->  {PROVIDERS[prov]['label']}")
+    else:
+        print("3. Правила роботи з пам'яттю лежать у файлах інструкцій робочих")
+        print("   проєктів. Агент читає їх там, а не всередині сховища.")
     print("4. Глобальне підключення, якщо потрібно поза обраними проєктами:")
     for prov in providers:
         home_cfg = {"claude": "~/.claude/CLAUDE.md", "amp": "~/.config/amp/AGENTS.md",
@@ -1565,7 +1794,7 @@ def main() -> int:
         for note in adopt_existing(vault, providers):
             print(f"  {note}")
     else:
-        make_global_home(vault, projects, providers)
+        make_entry(vault, projects, providers)
         for p in projects:
             make_project(vault, p)
 
@@ -1590,12 +1819,19 @@ def main() -> int:
     if args.link:
         link_targets = [t.strip() for t in args.link.split(",") if t.strip()]
     elif args.yes:
-        # Раніше в цій гілці підключення пропускалося зовсім, і в робочих
-        # проєктах не з'являлося правил: агент відкривав проєкт і не знав,
-        # що пам'ять узагалі існує. Тепер підключаємо знайдені проєкти.
-        link_targets = [p["path"] for p in discover_projects(vault)]
-        if link_targets:
-            print(f"\nПідключаю пам'ять до знайдених проєктів: {len(link_targets)}")
+        # НІКОЛИ не підключаємо проєкти автоматично.
+        #
+        # Раніше тут стояв автоматичний обхід машини, і `--yes` означало
+        # «мовчки дописати блок у файли правил усіх знайдених проєктів».
+        # На практиці це дописало блок у 21 файл по всій машині, включно
+        # з чужими каталогами і бекапами, а при тестуванні у тимчасовій теці
+        # рознесло по робочих проєктах шлях до `/tmp`.
+        #
+        # `--yes` означає «не став питань про власну пам'ять», а не «правь
+        # файли, яких я тобі не називав». Редагування чужих файлів завжди
+        # потребує явного `--link`.
+        print("\nПроєкти не підключаю: у режимі --yes потрібен явний --link.")
+        print("  Підключити потім: ltm_init.py --link <шлях1>,<шлях2> --providers claude")
     else:
         link_targets = choose_projects(vault)
 
