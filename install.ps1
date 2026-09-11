@@ -85,9 +85,9 @@ foreach ($t in $Targets) {
 $first = Join-Path $Targets[0].Path $Name
 $need = @('SKILL.md','scripts\ltm_detect.py','scripts\ltm_init.py',
           'scripts\ltm_doctor.py','scripts\ltm_schedule.py','scripts\ltm_seed.py',
-          "scripts/ltm_uninstall.py", "scripts/ltm_version.py", "scripts/ltm_blocks.py",
-          "scripts/ltm_paths.py", "scripts/ltm_hooks.py", "scripts/ltm_session_start.py",
-          "scripts/ltm_precompact.py" "scripts/ltm_sync.py"]
+          'scripts\ltm_uninstall.py', 'scripts\ltm_version.py', 'scripts\ltm_blocks.py',
+          'scripts\ltm_paths.py', 'scripts\ltm_hooks.py', 'scripts\ltm_session_start.py',
+          'scripts\ltm_precompact.py','scripts\ltm_sync.py','scripts\ltm_amp.py')
 $missing = $need | Where-Object { -not (Test-Path (Join-Path $first $_)) }
 if ($missing) { Fail "не вистачає файлів: $($missing -join ', ')" }
 Write-Host "перевірка: усі файли на місці"
