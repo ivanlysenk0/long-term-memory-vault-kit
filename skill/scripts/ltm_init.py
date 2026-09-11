@@ -619,6 +619,19 @@ def rules_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def rules_content_key(text: str) -> str:
+    """Відбиток, нечутливий до порядку рядків.
+
+    Установка перелічує проєкти в тому порядку, як їх задав користувач,
+    а міграція бере їх із файлової системи, тобто відсортованими. Через це
+    два змістовно однакові файли правил дають різні хеші, і міграція
+    пропонувала `.new`, який відрізняється лише перестановкою двох рядків.
+    Тут порівнюємо набір рядків, а не їхній порядок.
+    """
+    lines = sorted(l.strip() for l in text.splitlines() if l.strip())
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:16]
+
+
 def stamp_rules(vault: Path, providers: list[str], text: str) -> None:
     p = vault / MANIFEST
     data: dict = {"version": 1, "installs": []}
@@ -806,6 +819,7 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
     # Файли правил розбираємо окремо: їх не можна просто дописати.
     rules_text = make_rules(vault, projects)
     want = rules_hash(rules_text)
+    want_key = rules_content_key(rules_text)
     stamps = {}
     mp = vault / MANIFEST
     if mp.is_file():
@@ -817,15 +831,21 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
             pass
 
     fresh: list[Path] = []      # можна оновити мовчки, людина не редагувала
-    edited: list[Path] = []     # редагована або невідома: чіпати не можна
+    edited: list[Path] = []     # відбиток є і не збігся: точно редагувала
+    unknown: list[Path] = []    # відбитка немає: судити не можемо, і не вигадуємо
     pending: list[Path] = []    # .new уже лежить поруч, людина ще не розібрала
     for prov in providers:
         f = vault / PROVIDERS[prov]["file"]
         if not f.is_file():
             continue
-        cur = rules_hash(f.read_text(encoding="utf-8", errors="replace"))
+        cur_text = f.read_text(encoding="utf-8", errors="replace")
+        cur = rules_hash(cur_text)
         if cur == want:
             continue                      # уже актуальні
+        # Ті самі правила, лише інший порядок перелічених проєктів.
+        # Пропонувати тут `.new` означало б турбувати людину через ніщо.
+        if rules_content_key(cur_text) == want_key:
+            continue
         known = stamps.get(PROVIDERS[prov]["file"])
         if known and known == cur:
             fresh.append(f)
@@ -835,10 +855,15 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
         new = f.with_suffix(f.suffix + ".new")
         if new.is_file() and rules_hash(new.read_text(encoding="utf-8", errors="replace")) == want:
             pending.append(f)
+        elif known:
+            edited.append(f)          # відбиток є, але інший: людина правила файл
         else:
-            edited.append(f)
+            # Пам'ять ставили версією, яка відбитків ще не писала. Сказати
+            # «ви змінювали руками» тут було б неправдою: ми просто не знаємо.
+            unknown.append(f)
 
-    if not missing and not fresh and not edited:
+    touched = edited + unknown
+    if not missing and not fresh and not touched:
         if pending:
             print("Структура актуальна. Лишилось розібрати вручну:")
             for f in pending:
@@ -861,6 +886,13 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
         print(f"\nПравила, які ви змінювали руками: {len(edited)}")
         for f in edited:
             print(f"  ! {f.name}: НЕ чіпаю, нову версію покладу поруч як {f.name}.new")
+    if unknown:
+        print(f"\nПравила старішої версії: {len(unknown)}")
+        print("  Пам'ять ставили версією, яка ще не записувала відбитків, тому")
+        print("  чи правили ви ці файли, невідомо. Тому НЕ чіпаю жодного:")
+        for f in unknown:
+            print(f"  ? {f.name}: нову версію покладу поруч як {f.name}.new")
+        print("  Порівняй їх (`diff CLAUDE.md CLAUDE.md.new`) і вирішуй сам.")
     print("\nЗаписи в knowledge, sessions, Raw і будь-який ваш текст не чіпаються.")
 
     if dry_run:
@@ -878,7 +910,7 @@ def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) ->
     for f in fresh:
         f.write_text(rules_text, encoding="utf-8")
         print(f"  оновлено: {f.name}")
-    for f in edited:
+    for f in touched:
         new = f.with_suffix(f.suffix + ".new")
         new.write_text(rules_text, encoding="utf-8")
         print(f"  покладено поруч: {new.name} (порівняй і перенеси потрібне вручну)")
