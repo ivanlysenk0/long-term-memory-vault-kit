@@ -118,14 +118,20 @@ sources: 0
 - посилання двосторонні: якщо A посилається на B, то B посилається на A
 - session-логи в граф не лінкуються
 
-### Наприкінці сесії
+### Збереження сесії
+
+Запускається, коли людина каже «збережи сесію», або коли ти сам бачиш, що
+тема завершена. Не чекай кінця розмови: людина часто не закриває сесію
+взагалі, і тоді робота зникне.
 
 1. створити `{p}/sessions/YYYY-MM-DD_HHMM_<agent>_<topic>.md`
 2. оновити `{p}/00-home/current-priorities.md` і `hot.md`
 3. дописати запис у `{p}/log.md`
 4. у session-файлі секція `## Створено / змінено в цій сесії` з посиланнями
    тільки на файли всередині сховища
-5. пройти чеклист Query -> Save вище
+5. пройти чеклист Query -> Save вище і, якщо є що зберігати,
+   **запропонувати людині** створити концепт-сторінку. Саме запропонувати:
+   рішення про те, що гідне knowledge, залишається за людиною.
 
 ### Первинні матеріали
 
@@ -236,14 +242,20 @@ sources: 0
 - ссылки двусторонние: если A ссылается на B, то B ссылается на A
 - session-логи в граф не линкуются
 
-### В конце сессии
+### Сохранение сессии
+
+Запускается, когда человек говорит «сохрани сессию», или когда ты сам видишь,
+что тема завершена. Не жди конца разговора: человек часто не закрывает сессию
+вообще, и тогда работа пропадёт.
 
 1. создать `{p}/sessions/YYYY-MM-DD_HHMM_<agent>_<topic>.md`
 2. обновить `{p}/00-home/current-priorities.md` и `hot.md`
 3. дописать запись в `{p}/log.md`
 4. в session-файле секция `## Создано / изменено в этой сессии` со ссылками
    только на файлы внутри хранилища
-5. пройти чеклист Query -> Save выше
+5. пройти чеклист Query -> Save выше и, если есть что сохранять,
+   **предложить человеку** создать концепт-страницу. Именно предложить:
+   решение о том, что достойно knowledge, остаётся за человеком.
 
 ### Первичные материалы
 
@@ -355,14 +367,20 @@ sources: 0
 - links are two-way: if A links to B, then B links back to A
 - session logs are not part of the graph and are not linked
 
-### At the end of a session
+### Saving a session
+
+Triggered when the person says "save the session", or when you see the topic
+is finished. Do not wait for the conversation to end: people often never close
+a session, and the work is lost.
 
 1. create `{p}/sessions/YYYY-MM-DD_HHMM_<agent>_<topic>.md`
 2. update `{p}/00-home/current-priorities.md` and `hot.md`
 3. append an entry to `{p}/log.md`
 4. in the session file add a `## Created / changed in this session` section
    linking only files inside the store
-5. walk the Query -> Save checklist above
+5. walk the Query -> Save checklist above and, if there is something worth
+   keeping, **offer the person** to create a concept page. Offer, not decide:
+   what deserves knowledge is the person's call.
 
 ### Primary material
 
