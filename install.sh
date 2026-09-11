@@ -92,7 +92,7 @@ need = ["SKILL.md", "scripts/ltm_detect.py", "scripts/ltm_init.py",
         "scripts/ltm_doctor.py", "scripts/ltm_schedule.py", "scripts/ltm_seed.py",
         "scripts/ltm_uninstall.py", "scripts/ltm_version.py", "scripts/ltm_blocks.py",
         "scripts/ltm_paths.py", "scripts/ltm_hooks.py", "scripts/ltm_session_start.py",
-        "scripts/ltm_precompact.py", "scripts/ltm_session_end.py"]
+        "scripts/ltm_precompact.py"]
 missing = [n for n in need if not (d / n).is_file()]
 if missing:
     print("ПОМИЛКА: не вистачає файлів: " + ", ".join(missing)); sys.exit(1)
