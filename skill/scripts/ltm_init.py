@@ -12,6 +12,7 @@ ltm_init.py - інтерактивне розгортання довготрив
     python3 ltm_init.py                    інтерактивно, поставить питання
     python3 ltm_init.py --check            лише діагностика, нічого не змінювати
     python3 ltm_init.py --update           оновити скрипти в наявній пам'яті
+    python3 ltm_init.py --migrate          оновити структуру і правила на місці
     python3 ltm_init.py --version          яка версія скіла і яка в пам'яті
     python3 ltm_init.py --path DIR --projects a,b --yes    без питань
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 __version__ = "1.1.0"
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -49,6 +51,11 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 
 created: list[str] = []
 skipped: list[str] = []
+# Сухий режим: write_once нічого не пише, лише збирає перелік у planned.
+# Потрібен для `--migrate --dry-run`: показати людині, що саме зміниться,
+# ДО того, як щось торкнеться її пам'яті.
+DRY_RUN = False
+planned: list[str] = []
 # Що саме ми зробили в чужих проєктах. Потрібно для чесного видалення:
 # створений нами файл прибирається цілком, чужий лише звільняється від блока.
 link_records: list[dict] = []
@@ -67,6 +74,9 @@ def write_once(path: Path, content: str) -> None:
     """Ніколи не затирати наявний файл: пам'ять дорожча за шаблон."""
     if path.exists():
         skipped.append(str(path))
+        return
+    if DRY_RUN:
+        planned.append(str(path))
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -231,11 +241,15 @@ def make_global_home(vault: Path, projects: list[str], providers: list[str] | No
             lines = text.rstrip().splitlines()
             last_row = max((i for i, l in enumerate(lines) if l.startswith("| [[")), default=len(lines) - 1)
             lines[last_row + 1:last_row + 1] = add.splitlines()
-            mi.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            created.append(f"{mi} (+{len(missing)} проєктів)")
-        else:
-            skipped.append(str(mi))
-        return
+            if DRY_RUN:
+                planned.append(f"{mi} (+{len(missing)} проєктів)")
+            else:
+                mi.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                created.append(f"{mi} (+{len(missing)} проєктів)")
+    # Раніше тут стояв `return`, і при наявному master-index функція виходила
+    # достроково: `log.md`, `00-home/operations.md` і `00-home/index.md` так
+    # і не з'являлися в старих установках. Виходу немає, бо `write_once`
+    # наявні файли й так не чіпає.
 
     rows = "\n".join(
         ["| [[00-global-home/00-home/index\\|Знання спільного рівня]] | Active | [[00-global-home/00-home/index]] |"]
@@ -596,6 +610,38 @@ def install_doctor(vault: Path) -> None:
 VAULT_SCRIPTS = ("ltm_doctor.py", "ltm_schedule.py", "ltm_seed.py", "ltm_uninstall.py")
 
 
+def rules_hash(text: str) -> str:
+    """Відбиток згенерованого файлу правил.
+
+    Потрібен міграції, щоб відрізнити файл, якого людина не чіпала, від того,
+    який вона правила руками. Перший можна оновити мовчки, другий чіпати не можна.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def stamp_rules(vault: Path, providers: list[str], text: str) -> None:
+    p = vault / MANIFEST
+    data: dict = {"version": 1, "installs": []}
+    if p.is_file():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(old, dict):
+                data = old
+        except (ValueError, OSError):
+            pass
+    h = rules_hash(text)
+    rules = data.get("rules_hash")
+    if not isinstance(rules, dict):
+        rules = {}
+    for prov in providers:
+        rules[PROVIDERS[prov]["file"]] = h
+    data["rules_hash"] = rules
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def stamp_version(vault: Path) -> None:
     """Записати в манифест, якої версії скрипти зараз лежать у пам'яті.
 
@@ -700,6 +746,153 @@ def update_scripts(vault: Path, auto_yes: bool = False) -> int:
         # опиняється в конвеєрі раніше за наші рядки: виглядає так, ніби
         # лікар відпрацював до оновлення.
         sys.stdout.flush()
+        try:
+            subprocess.call([sys.executable, str(doctor), "--vault", str(vault), "--quiet"])
+        except OSError as e:
+            print(f"  не вдалося запустити лікаря: {e}")
+    return 0
+
+
+def migrate_vault(vault: Path, dry_run: bool = False, auto_yes: bool = False) -> int:
+    """Оновити структуру і правила наявної пам'яті до поточної версії скіла.
+
+    Навіщо окремо від `--update`. Той режим оновлює виконувані скрипти, тобто
+    інструменти. Цей оновлює те, за чим працює агент: файли правил у корені
+    пам'яті і структурні файли, яких у старих установках просто не було
+    (`00-global-home/00-home/index.md`, `operations.md`, `pending-concepts.md`).
+    Правила визначають, ЯК агент поводиться з пам'яттю, і саме вони роками
+    лишалися версії першої установки: `write_once` мовчки пропускає наявний файл.
+
+    Записи користувача не чіпаються ніколи. Додаються лише відсутні файли,
+    а файл правил оновлюється тільки якщо людина його не редагувала: це
+    перевіряється відбитком у манифесті, а не здогадом.
+    """
+    global DRY_RUN
+    if not vault.is_dir():
+        print(f"Пам'яті за шляхом {vault} немає. Мігрувати нічого.")
+        return 1
+    if not (vault / "00-global-home").is_dir() and not (vault / ".ltm-vault").is_file():
+        print(f"За шляхом {vault} не схоже на нашу пам'ять: немає ні 00-global-home, ні .ltm-vault.")
+        print("Перевір шлях: ltm_init.py --migrate --path <vault>")
+        return 1
+
+    print(f"Пам'ять: {vault}")
+    print(f"Версія скіла: {__version__}\n")
+
+    projects = sorted(d.name for d in vault.iterdir()
+                      if d.is_dir() and not d.name.startswith(".")
+                      and d.name not in ("scripts", "Clippings", "00-global-home")
+                      and (d / "00-home").is_dir())
+    providers = [p for p in PROVIDERS if (vault / PROVIDERS[p]["file"]).is_file()]
+    if not providers:
+        providers = ["claude"]
+    print(f"Проєктів знайдено: {len(projects)}   Файли правил: "
+          f"{', '.join(PROVIDERS[p]['file'] for p in providers)}\n")
+
+    # Прохід у сухому режимі: генеруємо все те саме, що й установка, але
+    # write_once лише збирає перелік. Так ми дізнаємось, чого бракує,
+    # не торкнувшись жодного файлу.
+    planned.clear()
+    skipped.clear()
+    DRY_RUN = True
+    try:
+        make_global_home(vault, projects, providers)
+        for p in projects:
+            make_project(vault, p)
+    finally:
+        DRY_RUN = False
+    missing = sorted(set(planned))
+
+    # Файли правил розбираємо окремо: їх не можна просто дописати.
+    rules_text = make_rules(vault, projects)
+    want = rules_hash(rules_text)
+    stamps = {}
+    mp = vault / MANIFEST
+    if mp.is_file():
+        try:
+            data = json.loads(mp.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("rules_hash"), dict):
+                stamps = data["rules_hash"]
+        except (ValueError, OSError):
+            pass
+
+    fresh: list[Path] = []      # можна оновити мовчки, людина не редагувала
+    edited: list[Path] = []     # редагована або невідома: чіпати не можна
+    pending: list[Path] = []    # .new уже лежить поруч, людина ще не розібрала
+    for prov in providers:
+        f = vault / PROVIDERS[prov]["file"]
+        if not f.is_file():
+            continue
+        cur = rules_hash(f.read_text(encoding="utf-8", errors="replace"))
+        if cur == want:
+            continue                      # уже актуальні
+        known = stamps.get(PROVIDERS[prov]["file"])
+        if known and known == cur:
+            fresh.append(f)
+            continue
+        # Якщо .new з тим самим вмістом уже лежить поруч, не пропонуємо
+        # його вкотре: інакше людина бачить те саме попередження вічно.
+        new = f.with_suffix(f.suffix + ".new")
+        if new.is_file() and rules_hash(new.read_text(encoding="utf-8", errors="replace")) == want:
+            pending.append(f)
+        else:
+            edited.append(f)
+
+    if not missing and not fresh and not edited:
+        if pending:
+            print("Структура актуальна. Лишилось розібрати вручну:")
+            for f in pending:
+                print(f"  {f.name}.new  поруч із вашим {f.name}")
+            print("\nПорівняй їх, перенеси потрібне у свій файл і видали .new.")
+            return 0
+        print("Структура і правила вже відповідають поточній версії. Мігрувати нічого.")
+        return 0
+
+    print("--- Що зміниться ---")
+    if missing:
+        print(f"\nДодати відсутні файли: {len(missing)}")
+        for m in missing:
+            print(f"  + {Path(m).relative_to(vault)}")
+    if fresh:
+        print(f"\nОновити правила (ви їх не редагували): {len(fresh)}")
+        for f in fresh:
+            print(f"  ~ {f.name}")
+    if edited:
+        print(f"\nПравила, які ви змінювали руками: {len(edited)}")
+        for f in edited:
+            print(f"  ! {f.name}: НЕ чіпаю, нову версію покладу поруч як {f.name}.new")
+    print("\nЗаписи в knowledge, sessions, Raw і будь-який ваш текст не чіпаються.")
+
+    if dry_run:
+        print("\nСухий режим: нічого не змінено.")
+        return 0
+    if not auto_yes and not ask_yes("\nЗастосувати?"):
+        print("Скасовано.")
+        return 0
+
+    created.clear()
+    make_global_home(vault, projects, providers)
+    for p in projects:
+        make_project(vault, p)
+
+    for f in fresh:
+        f.write_text(rules_text, encoding="utf-8")
+        print(f"  оновлено: {f.name}")
+    for f in edited:
+        new = f.with_suffix(f.suffix + ".new")
+        new.write_text(rules_text, encoding="utf-8")
+        print(f"  покладено поруч: {new.name} (порівняй і перенеси потрібне вручну)")
+
+    if fresh:
+        provs = [p for p in providers if (vault / PROVIDERS[p]["file"]) in fresh]
+        stamp_rules(vault, provs, rules_text)
+    stamp_version(vault)
+
+    print(f"\nДодано файлів: {len(created)}")
+    print("Готово. Перевірка пам'яті:")
+    sys.stdout.flush()
+    doctor = vault / "scripts" / "ltm_doctor.py"
+    if doctor.is_file():
         try:
             subprocess.call([sys.executable, str(doctor), "--vault", str(vault), "--quiet"])
         except OSError as e:
@@ -1226,6 +1419,10 @@ def main() -> int:
                     help="прибрати пам'ять і всі сліди установки")
     ap.add_argument("--update", action="store_true",
                     help="оновити скрипти всередині пам'яті до версії скіла")
+    ap.add_argument("--migrate", action="store_true",
+                    help="оновити структуру і правила наявної пам'яті, записи не чіпає")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="з --migrate: лише показати, що змінилося б")
     ap.add_argument("--version", action="store_true",
                     help="показати версію скіла і версію скриптів у пам'яті")
     args = ap.parse_args()
@@ -1247,14 +1444,27 @@ def main() -> int:
     if args.update:
         v = Path(args.path).expanduser() if args.path else default_vault_path()
         return update_scripts(v, auto_yes=args.yes)
+    if args.migrate:
+        v = Path(args.path).expanduser() if args.path else default_vault_path()
+        return migrate_vault(v, dry_run=args.dry_run, auto_yes=args.yes)
     if not args.yes and not args.check and not args.path and not args.adopt:
         print("Що робимо?")
         print("  1. Встановити пам'ять")
         print("  2. Оновити скрипти наявної пам'яті до версії скіла")
-        print("  3. Видалити все, що поставив цей скіл")
+        print("  3. Оновити структуру і правила наявної пам'яті")
+        print("  4. Видалити все, що поставив цей скіл")
         choice = ask("Номер", "1").strip()
-        if choice == "3":
+        if choice == "4":
             return run_uninstall([])
+        if choice == "3":
+            v = Path(ask("Де лежить пам'ять", str(default_vault_path()))).expanduser()
+            # Спершу завжди сухий прогін: людина мусить побачити перелік
+            # до того, як щось торкнеться її пам'яті.
+            migrate_vault(v, dry_run=True)
+            if not ask_yes("\nЗастосувати ці зміни?"):
+                print("Скасовано.")
+                return 0
+            return migrate_vault(v, auto_yes=True)
         if choice == "2":
             v = Path(ask("Де лежить пам'ять", str(default_vault_path()))).expanduser()
             return update_scripts(v)
@@ -1331,6 +1541,7 @@ def main() -> int:
     # Один текст под разными именами: каждый агент читает своё имя файла.
     for prov in providers:
         write_once(vault / PROVIDERS[prov]["file"], rules)
+    stamp_rules(vault, providers, rules)
     write_once(vault / "README.md",
         fm("Довготривала пам'ять", "global", "meta", ["vault", "memory"]) +
         "# Довготривала пам'ять агентів\n\n"
