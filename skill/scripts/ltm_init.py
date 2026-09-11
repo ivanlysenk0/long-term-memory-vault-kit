@@ -11,13 +11,18 @@ ltm_init.py - інтерактивне розгортання довготрив
 Використання:
     python3 ltm_init.py                    інтерактивно, поставить питання
     python3 ltm_init.py --check            лише діагностика, нічого не змінювати
+    python3 ltm_init.py --update           оновити скрипти в наявній пам'яті
+    python3 ltm_init.py --version          яка версія скіла і яка в пам'яті
     python3 ltm_init.py --path DIR --projects a,b --yes    без питань
 
 Скрипт ідемпотентний: повторний запуск не перезаписує готові файли,
-а лише дописує те, чого бракує.
+а лише дописує те, чого бракує. Саме тому оновлення виконуваних скриптів
+винесене в окремий режим `--update`: установка їх навмисно не чіпає.
 """
 
 from __future__ import annotations
+
+__version__ = "1.1.0"
 
 import argparse
 import json
@@ -588,6 +593,120 @@ def install_doctor(vault: Path) -> None:
             sh.chmod(0o755)
 
 
+VAULT_SCRIPTS = ("ltm_doctor.py", "ltm_schedule.py", "ltm_seed.py", "ltm_uninstall.py")
+
+
+def stamp_version(vault: Path) -> None:
+    """Записати в манифест, якої версії скрипти зараз лежать у пам'яті.
+
+    Без цього на питання «яка версія стоїть у користувача» відповісти нічим,
+    і лікар не може сказати «твої скрипти старіші за скіл».
+    """
+    p = vault / MANIFEST
+    data: dict = {"version": 1, "installs": []}
+    if p.is_file():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(old, dict):
+                data = old
+        except (ValueError, OSError):
+            pass
+    data["scripts_version"] = __version__
+    data["scripts_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        print(f"  УВАГА: версію не записано в манифест ({e})")
+
+
+def installed_version(vault: Path) -> str | None:
+    p = vault / MANIFEST
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    v = data.get("scripts_version") if isinstance(data, dict) else None
+    return v if isinstance(v, str) else None
+
+
+def update_scripts(vault: Path, auto_yes: bool = False) -> int:
+    """Оновити скрипти всередині пам'яті до версії скіла.
+
+    Це окрема дія, а не частина установки. Установка навмисно нічого не
+    затирає (`write_once`), і саме через це скрипти в пам'яті лишалися
+    вічно старими: `install_doctor` бачив наявний файл і пропускав його.
+    Тут перезапис навмисний і стосується ЛИШЕ виконуваних файлів у
+    `<vault>/scripts/`. Структура, knowledge, правила і будь-який текст
+    пам'яті не чіпаються взагалі.
+    """
+    src_dir = Path(__file__).resolve().parent
+    dst_dir = vault / "scripts"
+
+    if not vault.is_dir():
+        print(f"Пам'яті за шляхом {vault} немає. Оновлювати нічого.")
+        print("Спершу встановлення: python3 ltm_init.py")
+        return 1
+
+    have = installed_version(vault)
+    print(f"Пам'ять: {vault}")
+    print(f"Версія скрипта-скіла: {__version__}")
+    print(f"Версія в пам'яті: {have or 'невідома, манифест без позначки'}")
+
+    plan: list[tuple[Path, Path, str]] = []
+    for name in VAULT_SCRIPTS:
+        src = src_dir / name
+        dst = dst_dir / name
+        if not src.is_file():
+            print(f"  УВАГА: поруч зі скіла немає {name}, пропускаю")
+            continue
+        if not dst.is_file():
+            plan.append((src, dst, "додати, файла ще немає"))
+        elif src.read_bytes() != dst.read_bytes():
+            plan.append((src, dst, "оновити, вміст відрізняється"))
+
+    if not plan:
+        print("\nУсі скрипти в пам'яті вже збігаються зі скілом. Нічого робити.")
+        stamp_version(vault)
+        return 0
+
+    print(f"\nБуде перезаписано файлів: {len(plan)}")
+    for _, dst, why in plan:
+        print(f"  {dst}  ({why})")
+    print("\nВміст пам'яті не змінюється: лише ці виконувані файли.")
+
+    if not auto_yes and not ask_yes("Оновлюємо?"):
+        print("Скасовано.")
+        return 0
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src, dst, _ in plan:
+        shutil.copy2(src, dst)
+        if os.name != "nt":
+            try:
+                dst.chmod(0o755)
+            except OSError:
+                pass
+        print(f"  оновлено: {dst}")
+
+    stamp_version(vault)
+    print(f"\nГотово. Версія в пам'яті тепер {__version__}.")
+
+    doctor = dst_dir / "ltm_doctor.py"
+    if doctor.is_file():
+        print("Перевірка пам'яті після оновлення:")
+        # Без flush дочірній процес пише у дескриптор напряму і його вивід
+        # опиняється в конвеєрі раніше за наші рядки: виглядає так, ніби
+        # лікар відпрацював до оновлення.
+        sys.stdout.flush()
+        try:
+            subprocess.call([sys.executable, str(doctor), "--vault", str(vault), "--quiet"])
+        except OSError as e:
+            print(f"  не вдалося запустити лікаря: {e}")
+    return 0
+
+
 MEMORY_BLOCK_START = "<!-- ltm:start -->"
 MEMORY_BLOCK_END = "<!-- ltm:end -->"
 
@@ -1105,7 +1224,18 @@ def main() -> int:
                     help="агенти через кому: claude, amp, gemini. За замовчуванням спитає")
     ap.add_argument("--uninstall", action="store_true",
                     help="прибрати пам'ять і всі сліди установки")
+    ap.add_argument("--update", action="store_true",
+                    help="оновити скрипти всередині пам'яті до версії скіла")
+    ap.add_argument("--version", action="store_true",
+                    help="показати версію скіла і версію скриптів у пам'яті")
     args = ap.parse_args()
+
+    if args.version:
+        v = Path(args.path).expanduser() if args.path else default_vault_path()
+        print(f"ltm_init.py {__version__}")
+        print(f"пам'ять: {v}")
+        print(f"версія скриптів у пам'яті: {installed_version(v) or 'невідома'}")
+        return 0
 
     print("Довготривала пам'ять агентів\n")
 
@@ -1114,13 +1244,20 @@ def main() -> int:
     # вже йде поверх залишків першої.
     if args.uninstall:
         return run_uninstall([])
+    if args.update:
+        v = Path(args.path).expanduser() if args.path else default_vault_path()
+        return update_scripts(v, auto_yes=args.yes)
     if not args.yes and not args.check and not args.path and not args.adopt:
         print("Що робимо?")
-        print("  1. Встановити або оновити пам'ять")
-        print("  2. Видалити все, що поставив цей скіл")
+        print("  1. Встановити пам'ять")
+        print("  2. Оновити скрипти наявної пам'яті до версії скіла")
+        print("  3. Видалити все, що поставив цей скіл")
         choice = ask("Номер", "1").strip()
-        if choice == "2":
+        if choice == "3":
             return run_uninstall([])
+        if choice == "2":
+            v = Path(ask("Де лежить пам'ять", str(default_vault_path()))).expanduser()
+            return update_scripts(v)
         print()
 
     vault = Path(args.path).expanduser() if args.path else default_vault_path()
@@ -1233,6 +1370,7 @@ def main() -> int:
         print("  Підключи вручну: ltm_init.py --link <шлях> --providers claude")
 
     write_manifest(vault, projects, providers)
+    stamp_version(vault)
 
     print(f"\nСтворено файлів і тек: {len(created)}")
     if skipped:

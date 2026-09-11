@@ -21,6 +21,8 @@ ltm_doctor.py - перевірка здоров'я довготривалої п
 
 from __future__ import annotations
 
+__version__ = "1.1.0"
+
 import argparse
 import json
 import os
@@ -193,6 +195,38 @@ class Report:
 
     def warn(self, check: str, msg: str, file: str = ""):
         self.warnings.append({"check": check, "message": msg, "file": file})
+
+
+def check_scripts_version(vault: Path, rep: Report) -> None:
+    """Перевірка 10: чи не відстали скрипти в пам'яті від версії скіла.
+
+    Скрипти всередині пам'яті установка навмисно не перезаписує, тому вони
+    легко лишаються старими на місяці. Мовчки це не видно: пам'ять здорова,
+    а лікар при цьому старої версії і частини перевірок просто не має.
+    """
+    rep.stats["scripts_version"] = __version__
+    p = vault / ".ltm-install-manifest.json"
+    if not p.is_file():
+        rep.stats["scripts_version_vault"] = None
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        rep.stats["scripts_version_vault"] = None
+        return
+    have = data.get("scripts_version") if isinstance(data, dict) else None
+    rep.stats["scripts_version_vault"] = have
+    if have is None:
+        rep.warn("scripts_version",
+                 "у манифесті немає позначки версії скриптів. Онови: "
+                 "python3 <скіл>/scripts/ltm_init.py --update --path " + str(vault),
+                 ".ltm-install-manifest.json")
+        return
+    if have != __version__:
+        rep.warn("scripts_version",
+                 f"скрипти в пам'яті версії {have}, скіл версії {__version__}. Онови: "
+                 "python3 <скіл>/scripts/ltm_init.py --update --path " + str(vault),
+                 ".ltm-install-manifest.json")
 
 
 def run_checks(vault: Path, files: list[Path], rep: Report) -> None:
@@ -473,6 +507,7 @@ def main() -> int:
     files = collect_md(vault)
     rep = Report()
     run_checks(vault, files, rep)
+    check_scripts_version(vault, rep)
 
     if args.json:
         print(json.dumps({
@@ -484,7 +519,14 @@ def main() -> int:
         return 1 if rep.errors else 0
 
     print(f"=== Перевірка пам'яті: {vault} ===")
-    print(f"Файлів .md у графі: {rep.stats['files']}\n")
+    print(f"Файлів .md у графі: {rep.stats['files']}")
+    # Версію друкуємо завжди, навіть у --quiet: саме в тихому режимі лікар
+    # ходить за розкладом, і попередження про застарілі скрипти там не видно.
+    have = rep.stats.get("scripts_version_vault")
+    if have != __version__:
+        print(f"Скрипти: у пам'яті {have or 'версія невідома'}, у скілі {__version__}. "
+              f"Онови: ltm_init.py --update --path {vault}")
+    print()
 
     if not args.quiet:
         for item in rep.errors:
